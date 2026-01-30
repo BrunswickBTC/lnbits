@@ -13,13 +13,14 @@ from lnbits.core.crud.payments import get_daily_stats
 from lnbits.core.db import db
 from lnbits.core.models import PaymentDailyStats, PaymentFilters
 from lnbits.core.models.payments import CreateInvoice
+from lnbits.core.services.fiat_providers import handle_fiat_payment_confirmation
 from lnbits.db import Connection, Filters
 from lnbits.decorators import check_user_extension_access
 from lnbits.exceptions import InvoiceError, PaymentError, UnsupportedError
 from lnbits.fiat import get_fiat_provider
 from lnbits.helpers import check_callback_url
 from lnbits.settings import settings
-from lnbits.tasks import create_task, internal_invoice_queue_put
+from lnbits.task_manager import task_manager
 from lnbits.utils.crypto import fake_privkey, random_secret_and_hash, verify_preimage
 from lnbits.utils.exchange_rates import fiat_amount_as_satoshis, satoshis_amount_as_fiat
 from lnbits.wallets import fake_wallet, get_funding_source
@@ -509,7 +510,7 @@ async def update_wallet_balance(
         )
         payment.status = PaymentState.SUCCESS
         await update_payment(payment, conn=conn)
-        await internal_invoice_queue_put(payment.checking_id)
+        task_manager.internal_invoice_queue.put_nowait(payment)
 
 
 async def check_wallet_limits(
@@ -778,11 +779,8 @@ async def _pay_internal_invoice(
 
     await _send_payment_notification_in_background(wallet.id, payment, conn=conn)
 
-    # notify receiver asynchronously
-    from lnbits.tasks import internal_invoice_queue
-
     logger.debug(f"enqueuing internal invoice {internal_payment.checking_id}")
-    await internal_invoice_queue.put(internal_payment.checking_id)
+    task_manager.internal_invoice_queue.put_nowait(internal_payment)
 
     return payment
 
@@ -819,14 +817,19 @@ async def _pay_external_invoice(
 
     fee_reserve_msat = fee_reserve(amount_msat, internal=False)
 
-    task = create_task(
-        _fundingsource_pay_invoice(checking_id, payment.bolt11, fee_reserve_msat)
+    task = task_manager.create_task(
+        _fundingsource_pay_invoice(checking_id, payment.bolt11, fee_reserve_msat),
+        f"fundingsource_pay_invoice_{checking_id}",
     )
+    if not task.task:
+        raise PaymentError(
+            "Fundingsource pay_invoice task could not be started.", status="failed"
+        )
 
     # make sure a hold invoice or deferred payment is not blocking the server
     wait_time = max(1, settings.lnbits_funding_source_pay_invoice_wait_seconds)
     try:
-        payment_response = await asyncio.wait_for(task, timeout=wait_time)
+        payment_response = await asyncio.wait_for(task.task, timeout=wait_time)
     except asyncio.TimeoutError:
         # return pending payment on timeout
         logger.debug(
@@ -1068,3 +1071,45 @@ async def _send_payment_notification_in_background(
     if not wallet:
         raise PaymentError(f"Could not fetch wallet '{wallet_id}'.", status="failed")
     send_payment_notification_in_background(wallet, payment)
+
+
+async def _update_invoice_callback(checking_id: str) -> Payment | None:
+    """
+    Takes an incoming checking_id from `funding_source.paid_invoices_stream()`,
+    Updates the payment's preimage, fee and status.
+    """
+    payment = await get_standalone_payment(checking_id, incoming=True)
+    if not payment:
+        logger.warning(f"No payment found for '{checking_id}'.")
+        return None
+    if not payment.is_in:
+        logger.warning(f"Payment '{checking_id}' is not incoming, skipping.")
+        return None
+
+    status = await check_payment_status(
+        payment, skip_internal_payment_notifications=True
+    )
+    payment.fee = status.fee_msat or payment.fee
+    # only overwrite preimage if status.preimage provides it
+    payment.preimage = status.preimage or payment.preimage
+    payment.status = PaymentState.SUCCESS
+    await update_payment(payment)
+
+    if payment.fiat_provider:
+        await handle_fiat_payment_confirmation(payment)
+
+    return payment
+
+
+async def fundingsource_invoice_producer() -> None:
+    """
+    Listens for paid invoices from the funding source and updates
+    the corresponding payments in the database. Enqueues successful payments
+    to the invoice queue for dispatching to other listeners.
+    """
+    funding_source = get_funding_source()
+    async for checking_id in funding_source.paid_invoices_stream():
+        logger.info(f"got a payment notification {checking_id}")
+        payment = await _update_invoice_callback(checking_id)
+        if payment:
+            task_manager.invoice_queue.put_nowait(payment)

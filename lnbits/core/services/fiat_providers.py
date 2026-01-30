@@ -20,6 +20,8 @@ from lnbits.fiat.base import (
 )
 from lnbits.settings import settings
 
+# from lnbits.task_manager import task_manager
+
 
 async def handle_fiat_payment_confirmation(
     payment: Payment, conn: Connection | None = None
@@ -60,11 +62,8 @@ async def check_fiat_status(
     if skip_internal_payment_notifications:
         return fiat_status
 
-    if fiat_status.success:
-        # notify receivers asynchronously
-        from lnbits.tasks import internal_invoice_queue
-
-        await internal_invoice_queue.put(payment.checking_id)
+    # if fiat_status.success:
+    #     task_manager.internal_invoice_queue.put_nowait(payment)
 
     return fiat_status
 
