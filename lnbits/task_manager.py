@@ -119,7 +119,7 @@ class TaskManager:
         incoming payments. Will call provided Coroutine with the updated payment.
         """
         name = f"{name or uuid.uuid4()}_invoice_listener"
-        queue = asyncio.Queue()
+        queue: asyncio.Queue[Payment] = asyncio.Queue()
         return self.create_permanent_task(
             self._invoice_listener_worker(func, queue),
             name=name,
@@ -163,8 +163,8 @@ class TaskManager:
 
     def _invoice_listener_worker(
         self, func: Callable[[Payment], Coroutine], queue: asyncio.Queue[Payment]
-    ):
-        async def wrapper():
+    ) -> Callable:
+        async def wrapper() -> None:
             payment: Payment = await queue.get()
             await func(payment)
 
