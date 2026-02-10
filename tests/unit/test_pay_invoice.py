@@ -15,11 +15,7 @@ from lnbits.core.services import create_invoice, create_user_account, pay_invoic
 from lnbits.core.services.payments import update_wallet_balance
 from lnbits.exceptions import InvoiceError, PaymentError
 from lnbits.settings import Settings
-from lnbits.tasks import (
-    create_permanent_task,
-    internal_invoice_listener,
-    register_invoice_listener,
-)
+from lnbits.task_manager import task_manager
 from lnbits.wallets.base import PaymentResponse
 from lnbits.wallets.fake import FakeWallet
 
@@ -233,23 +229,7 @@ async def test_pay_for_extension(to_wallet: Wallet, settings: Settings):
 async def test_notification_for_internal_payment(to_wallet: Wallet):
     test_name = "test_notification_for_internal_payment"
 
-    create_permanent_task(internal_invoice_listener)
-    invoice_queue: asyncio.Queue = asyncio.Queue()
-    register_invoice_listener(invoice_queue, test_name)
-
-    payment = await create_invoice(
-        wallet_id=to_wallet.id,
-        amount=123,
-        memo=test_name,
-        webhook="http://test.404.lnbits.com",
-    )
-    await pay_invoice(
-        wallet_id=to_wallet.id, payment_request=payment.bolt11, extra={"tag": "lnurlp"}
-    )
-    await asyncio.sleep(1)
-
-    while True:
-        _payment: Payment = invoice_queue.get_nowait()  # raises if queue empty
+    async def on_invoice(_payment: Payment):
         assert _payment
         if _payment.memo == test_name:
             assert _payment.status == PaymentState.SUCCESS.value
@@ -257,8 +237,25 @@ async def test_notification_for_internal_payment(to_wallet: Wallet):
             assert _payment.amount == 123_000
             updated_payment = await get_payment(_payment.checking_id)
             assert updated_payment.webhook_status == "404"
+            raise StopAsyncIteration
 
-            break  # we found our payment, success
+    task = task_manager.register_invoice_listener(on_invoice, test_name)
+    assert task._task
+
+    payment = await create_invoice(
+        wallet_id=to_wallet.id,
+        amount=123,
+        memo=test_name,
+        webhook="http://test.404.lnbits.com",
+    )
+
+    await pay_invoice(
+        wallet_id=to_wallet.id, payment_request=payment.bolt11, extra={"tag": "lnurlp"}
+    )
+    await asyncio.sleep(1)
+
+    with pytest.raises(StopAsyncIteration):
+        await task._task
 
 
 @pytest.mark.anyio

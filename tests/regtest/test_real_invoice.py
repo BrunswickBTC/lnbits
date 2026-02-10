@@ -15,10 +15,10 @@ from lnbits.core.services import (
 from lnbits.core.services.payments import pay_invoice, update_wallet_balance
 from lnbits.core.services.users import create_user_account
 from lnbits.exceptions import PaymentError
-from lnbits.tasks import create_task, wait_for_paid_invoices
+from lnbits.task_manager import task_manager
 from lnbits.wallets import get_funding_source
 
-from ..helpers import FakeError, is_fake, is_regtest
+from ..helpers import is_fake, is_regtest
 from .helpers import (
     cancel_invoice,
     get_real_invoice,
@@ -175,15 +175,15 @@ async def test_create_real_invoice(client, adminkey_headers_from, inkey_headers_
 
         assert payment_status.get("preimage") is not None
 
-        # exit out of infinite loop
-        raise FakeError()
+        raise StopAsyncIteration
 
-    task = create_task(wait_for_paid_invoices("test_create_invoice", on_paid)())
+    task = task_manager.register_invoice_listener(on_paid, "test_create_invoice")
+    assert task._task
+
     pay_real_invoice(invoice["bolt11"])
 
-    # wait for the task to exit
-    with pytest.raises(FakeError):
-        await task
+    with pytest.raises(StopAsyncIteration):
+        await task._task
 
 
 @pytest.mark.anyio
@@ -416,14 +416,15 @@ async def test_receive_real_invoice_set_pending_and_check_state(
         assert payment_pending.success is False
         assert payment_pending.failed is False
 
-        # exit out of infinite loop
-        raise FakeError()
+        raise StopAsyncIteration
 
-    task = create_task(wait_for_paid_invoices("test_create_invoice", on_paid)())
+    task = task_manager.register_invoice_listener(on_paid, "test_create_invoice")
+    assert task._task
+
     pay_real_invoice(invoice["bolt11"])
 
-    with pytest.raises(FakeError):
-        await task
+    with pytest.raises(StopAsyncIteration):
+        await task._task
 
 
 @pytest.mark.anyio
