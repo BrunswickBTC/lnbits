@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
+import base64
+import json
 
 
 class NutshellError(RuntimeError):
@@ -165,12 +167,41 @@ class NutshellClient:
         return await self._req("POST", "/v1/melt/status", json=payload)
 
 
-def encode_checking_id(mint_url: str, quote: str) -> str:
-    # stable, human-readable, no JSON dependency in LNBits DB field
-    return f"{mint_url}|{quote}"
+def encode_checking_id(mint_url: str, unit: str, quote: str) -> str:
+    payload = {"m": mint_url, "u": unit, "q": quote}
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    # store unpadded base64url (cleaner, still decodable)
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def decode_checking_id(checking_id: str) -> Tuple[str, str]:
-    mint_url, quote = checking_id.split("|", 1)
-    return mint_url, quote
+def decode_checking_id(checking_id: str) -> Tuple[str, str, str]:
+    s = (checking_id or "").strip()
+
+    # Legacy: 2-field or 3-field pipe encoding
+    if "|" in s:
+        parts = s.split("|")
+        if len(parts) == 2:
+            mint_url, quote = parts
+            return mint_url, "sat", quote
+        if len(parts) == 3:
+            mint_url, unit, quote = parts
+            return mint_url, unit, quote
+        raise ValueError(f"Invalid legacy checking_id (pipe parts={len(parts)}): {checking_id!r}")
+
+    # New: base64url(JSON), accept missing padding
+    try:
+        pad = "=" * (-len(s) % 4)
+        raw = base64.urlsafe_b64decode((s + pad).encode("ascii"))
+        obj = json.loads(raw.decode("utf-8"))
+
+        # accept either short or long keys
+        mint_url = obj.get("m") or obj.get("mint_url")
+        unit = obj.get("u") or obj.get("unit") or "sat"
+        quote = obj.get("q") or obj.get("quote")
+
+        if not mint_url or not quote:
+            raise KeyError("missing mint_url/quote")
+        return mint_url, unit, quote
+    except Exception as e:
+        raise ValueError(f"Invalid checking_id: {checking_id!r}") from e
 

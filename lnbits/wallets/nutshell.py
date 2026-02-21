@@ -79,7 +79,7 @@ class NutshellWallet(Wallet):
                     q = await self.client.mint_quote(
                         amount=amount_sat, unit="sat", mint_url=mint_url
                     )
-                    checking_id = encode_checking_id(q.mint_url, q.quote)
+                    checking_id = encode_checking_id(q.mint_url, unit="sat", q.quote)
                     # LNbits uses checking_id to later ask "paid?"
                     self.pending_invoices.append(checking_id)
                     return InvoiceResponse(
@@ -93,19 +93,25 @@ class NutshellWallet(Wallet):
         except Exception as e:
             return InvoiceResponse(ok=False, error_message=str(e))
 
+
     async def get_invoice_status(self, checking_id: str) -> PaymentStatus:
         try:
-            mint_url, quote = decode_checking_id(checking_id)
+            mint_url, unit, quote = decode_checking_id(checking_id)
             st = await self.client.mint_status(quote=quote, mint_url=mint_url)
 
             if st.get("paid") is True:
                 # finalize mint (idempotent)
                 try:
-                    await self.client.mint_execute(quote=quote, unit="sat", mint_url=mint_url)
-                except Exception:
-                    # if it already executed, fine; if not, walletd should explain elsewhere
-                    pass
-                return PaymentSuccessStatus()
+                    await self.client.mint_execute(quote=quote, unit=unit, mint_url=mint_url)
+                    return PaymentSuccessStatus()
+                except Exception as e:
+                    # Only treat as success if walletd says it's already claimed/minted.
+                    msg = str(e).lower()
+                    if "already" in msg and ("claimed" in msg or "mint" in msg):
+                        return PaymentSuccessStatus()
+
+                    logger.warning(f"mint_execute failed for {checking_id}: {e}")
+                    return PaymentPendingStatus()
 
             # If walletd returns an explicit failure state, honor it.
             if st.get("failed") is True or st.get("status") in {"failed", "expired", "canceled"}:
@@ -115,6 +121,7 @@ class NutshellWallet(Wallet):
         except Exception as e:
             logger.warning(f"NutshellWallet get_invoice_status error: {e}")
             return PaymentPendingStatus()
+
 
     async def pay_invoice(self, bolt11: str, fee_limit_msat: int) -> PaymentResponse:
         try:
@@ -144,7 +151,7 @@ class NutshellWallet(Wallet):
                         unit="sat",
                         mint_url=mint_url,
                     )
-                    checking_id = encode_checking_id(q.mint_url, q.quote)
+                    checking_id = encode_checking_id(q.mint_url, unit="sat", q.quote)
 
                     fee_sat = ex.data.get("fee_paid_sat", ex.data.get("fee_paid", q.fee_reserve))
                     fee_msat = int(fee_sat) * SAT_TO_MSAT
@@ -163,7 +170,7 @@ class NutshellWallet(Wallet):
 
     async def get_payment_status(self, checking_id: str) -> PaymentStatus:
         try:
-            mint_url, quote = decode_checking_id(checking_id)
+            mint_url, unit, quote = decode_checking_id(checking_id)
             st = await self.client.melt_status(quote=quote, mint_url=mint_url)
 
             if st.get("paid") is True:
