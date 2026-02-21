@@ -79,7 +79,7 @@ class NutshellWallet(Wallet):
                     q = await self.client.mint_quote(
                         amount=amount_sat, unit="sat", mint_url=mint_url
                     )
-                    checking_id = encode_checking_id(q.mint_url, unit="sat", q.quote)
+                    checking_id = encode_checking_id(q.mint_url, "sat", q.quote)
                     # LNbits uses checking_id to later ask "paid?"
                     self.pending_invoices.append(checking_id)
                     return InvoiceResponse(
@@ -151,7 +151,7 @@ class NutshellWallet(Wallet):
                         unit="sat",
                         mint_url=mint_url,
                     )
-                    checking_id = encode_checking_id(q.mint_url, unit="sat", q.quote)
+                    checking_id = encode_checking_id(q.mint_url, "sat", q.quote)
 
                     fee_sat = ex.data.get("fee_paid_sat", ex.data.get("fee_paid", q.fee_reserve))
                     fee_msat = int(fee_sat) * SAT_TO_MSAT
