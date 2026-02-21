@@ -99,7 +99,8 @@ class NutshellWallet(Wallet):
             mint_url, unit, quote = decode_checking_id(checking_id)
             st = await self.client.mint_status(quote=quote, mint_url=mint_url)
 
-            if st.get("paid") is True:
+            #if st.get("paid") is True:
+            if st.get("status") in {"claimable"}:
                 # finalize mint (idempotent)
                 try:
                     await self.client.mint_execute(quote=quote, unit=unit, mint_url=mint_url)

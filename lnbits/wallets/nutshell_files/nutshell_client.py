@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from loguru import logger
 
 import httpx
 import base64
@@ -77,12 +78,17 @@ class NutshellClient:
         await self._client.aclose()
 
     async def _req(self, method: str, path: str, json: Optional[dict] = None) -> Any:
+        logger.warning(f"NutshellWallet : NutshellClient._req(method={method},path={path},json={json})")
+
         r = await self._client.request(method, path, json=json)
         if r.status_code >= 400:
             # walletd should return structured errors; preserve body for diagnostics
             raise NutshellError(f"{method} {path} -> {r.status_code}: {r.text}")
         if r.headers.get("content-type", "").startswith("application/json"):
-            return r.json()
+            ret_json = r.json()
+            logger.warning(f"NutshellWallet : NutshellClient._req - got json - {ret_json})")
+            return ret_json
+        logger.warning(f"NutshellWallet : NutshellClient._req - got text - {r.text})")
         return r.text
 
     async def get_balance(self) -> Balance:
