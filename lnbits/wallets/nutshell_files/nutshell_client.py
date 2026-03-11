@@ -1,13 +1,9 @@
-# nutshell_client.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from loguru import logger
 
 import httpx
-import base64
-import json
 
 
 class NutshellError(RuntimeError):
@@ -27,33 +23,63 @@ class Balance:
 @dataclass(frozen=True)
 class MintQuote:
     mint_url: str
+    unit: str
     quote: str
     request: str  # bolt11
     amount: int
+
+
+@dataclass(frozen=True)
+class MintStatus:
+    mint_url: str
     unit: str
+    quote: str
+    status: str
+
+
+@dataclass(frozen=True)
+class MintExecuteResult:
+    mint_url: str
+    unit: str
+    quote: str
+    status: str
+    data: Dict[str, Any]
 
 
 @dataclass(frozen=True)
 class MeltQuote:
     mint_url: str
-    quote: str
+    unit: str
+    payment_hash: str
     amount: int
     fee_reserve: int
-    unit: str
 
 
 @dataclass(frozen=True)
-class ExecuteResult:
+class MeltExecuteResult:
     mint_url: str
-    quote: str
-    status: str  # "paid"|"pending"|"failed"|etc (walletd-defined)
+    unit: str
+    payment_hash: str
+    fee_paid_sat: Optional[int]
+    preimage: Optional[str]
+    status: str
     data: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class MeltStatus:
+    mint_url: str
+    unit: str
+    payment_hash: str
+    fee_paid_sat: Optional[int]
+    preimage: Optional[str]
+    status: str
 
 
 class NutshellClient:
     """
     Talks to walletd over Unix Domain Socket using HTTP.
-    Assumes walletd serves paths like /v1/balance, /v1/mint/quote, etc.
+    Assumes walletd serves /v1/* over UDS.
     """
 
     def __init__(
@@ -65,7 +91,6 @@ class NutshellClient:
         self.uds_path = uds_path
         self.base_url = base_url.rstrip("/")
         self.timeout = httpx.Timeout(timeout_s)
-
         transport = httpx.AsyncHTTPTransport(uds=self.uds_path)
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -78,21 +103,18 @@ class NutshellClient:
         await self._client.aclose()
 
     async def _req(self, method: str, path: str, json: Optional[dict] = None) -> Any:
-        logger.warning(f"NutshellWallet : NutshellClient._req(method={method},path={path},json={json})")
-
         r = await self._client.request(method, path, json=json)
         if r.status_code >= 400:
-            # walletd should return structured errors; preserve body for diagnostics
             raise NutshellError(f"{method} {path} -> {r.status_code}: {r.text}")
         if r.headers.get("content-type", "").startswith("application/json"):
-            ret_json = r.json()
-            logger.warning(f"NutshellWallet : NutshellClient._req - got json - {ret_json})")
-            return ret_json
-        logger.warning(f"NutshellWallet : NutshellClient._req - got text - {r.text})")
+            return r.json()
         return r.text
 
-    async def get_balance(self) -> Balance:
-        j = await self._req("GET", "/v1/balance")
+    async def get_balance(self, unit: Optional[str] = None) -> Balance:
+        path = "/v1/balance"
+        if unit:
+            path = f"/v1/balance?unit={unit}"
+        j = await self._req("GET", path)
         return Balance(
             wallet=j["wallet"],
             unit=j["unit"],
@@ -102,112 +124,109 @@ class NutshellClient:
             default_mint=j["default_mint"],
         )
 
-    async def mint_quote(self, amount: int, unit: str = "sat", mint_url: Optional[str] = None) -> MintQuote:
+    async def mint_quote(
+        self,
+        amount: int,
+        unit: str = "sat",
+        mint_url: Optional[str] = None,
+        memo: Optional[str] = None,
+    ) -> MintQuote:
         payload = {"amount": int(amount), "unit": unit}
         if mint_url:
             payload["mint_url"] = mint_url
+        if memo is not None:
+            payload["memo"] = memo
         j = await self._req("POST", "/v1/mint/quote", json=payload)
         return MintQuote(
             mint_url=j["mint_url"],
+            unit=j["unit"],
             quote=j["quote"],
             request=j["request"],
             amount=int(j["amount"]),
-            unit=j["unit"],
         )
 
-    async def mint_execute(self, quote: str, unit: str = "sat", mint_url: Optional[str] = None) -> ExecuteResult:
+    async def mint_status(
+        self,
+        quote: str,
+        unit: str = "sat",
+        mint_url: Optional[str] = None,
+    ) -> MintStatus:
+        payload = {"quote": quote, "unit": unit}
+        if mint_url:
+            payload["mint_url"] = mint_url
+        j = await self._req("POST", "/v1/mint/status", json=payload)
+        return MintStatus(
+            mint_url=j["mint_url"],
+            unit=j["unit"],
+            quote=j["quote"],
+            status=j["status"],
+        )
+
+    async def mint_execute(
+        self,
+        quote: str,
+        unit: str = "sat",
+        mint_url: Optional[str] = None,
+    ) -> MintExecuteResult:
         payload = {"quote": quote, "unit": unit}
         if mint_url:
             payload["mint_url"] = mint_url
         j = await self._req("POST", "/v1/mint/execute", json=payload)
-        return ExecuteResult(
-            mint_url=j.get("mint_url", mint_url or ""),
-            quote=j.get("quote", quote),
-            status=j.get("status", "unknown"),
+        return MintExecuteResult(
+            mint_url=j["mint_url"],
+            unit=j["unit"],
+            quote=j["quote"],
+            status=j["status"],
             data=j,
         )
 
-    async def melt_quote(self, invoice: str, unit: str = "sat", mint_url: Optional[str] = None) -> MeltQuote:
+    async def melt_quote(
+        self,
+        invoice: str,
+        unit: str = "sat",
+        mint_url: Optional[str] = None,
+    ) -> MeltQuote:
         payload = {"invoice": invoice, "unit": unit}
         if mint_url:
             payload["mint_url"] = mint_url
         j = await self._req("POST", "/v1/melt/quote", json=payload)
         return MeltQuote(
             mint_url=j["mint_url"],
-            quote=j["quote"],
+            unit=j["unit"],
+            payment_hash=j["payment_hash"],
             amount=int(j["amount"]),
             fee_reserve=int(j["fee_reserve"]),
-            unit=j["unit"],
         )
 
-    async def melt_execute(
-        self,
-        quote: str,
-        invoice: str,
-        fee_reserve: int,
-        unit: str = "sat",
-        mint_url: Optional[str] = None,
-    ) -> ExecuteResult:
-        payload = {"quote": quote, "invoice": invoice, "fee_reserve": int(fee_reserve), "unit": unit}
-        if mint_url:
-            payload["mint_url"] = mint_url
+    async def melt_execute(self, payment_hash: str) -> MeltExecuteResult:
+        payload = {"payment_hash": payment_hash}
         j = await self._req("POST", "/v1/melt/execute", json=payload)
-        return ExecuteResult(
-            mint_url=j.get("mint_url", mint_url or ""),
-            quote=j.get("quote", quote),
-            status=j.get("status", "unknown"),
+        return MeltExecuteResult(
+            mint_url=j["mint_url"],
+            unit=j["unit"],
+            payment_hash=j["payment_hash"],
+            fee_paid_sat=None if j.get("fee_paid_sat") is None else int(j["fee_paid_sat"]),
+            preimage=j.get("preimage"),
+            status=j["status"],
             data=j,
         )
 
-    # Optional: if you add explicit status endpoints in walletd
-    async def mint_status(self, quote: str, mint_url: Optional[str] = None) -> Dict[str, Any]:
-        payload = {"quote": quote}
-        if mint_url:
-            payload["mint_url"] = mint_url
-        return await self._req("POST", "/v1/mint/status", json=payload)
-
-    async def melt_status(self, quote: str, mint_url: Optional[str] = None) -> Dict[str, Any]:
-        payload = {"quote": quote}
-        if mint_url:
-            payload["mint_url"] = mint_url
-        return await self._req("POST", "/v1/melt/status", json=payload)
+    async def melt_status(self, payment_hash: str) -> MeltStatus:
+        j = await self._req("GET", f"/v1/melt/status/{payment_hash}")
+        return MeltStatus(
+            mint_url=j["mint_url"],
+            unit=j["unit"],
+            payment_hash=j["payment_hash"],
+            fee_paid_sat=None if j.get("fee_paid_sat") is None else int(j["fee_paid_sat"]),
+            preimage=j.get("preimage"),
+            status=j["status"],
+        )
 
 
-def encode_checking_id(mint_url: str, unit: str, quote: str) -> str:
-    payload = {"m": mint_url, "u": unit, "q": quote}
-    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    # store unpadded base64url (cleaner, still decodable)
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+def encode_mint_checking_id(mint_url: str, unit: str, quote: str) -> str:
+    return f"{mint_url}|{unit}|{quote}"
 
 
-def decode_checking_id(checking_id: str) -> Tuple[str, str, str]:
-    s = (checking_id or "").strip()
-
-    # Legacy: 2-field or 3-field pipe encoding
-    if "|" in s:
-        parts = s.split("|")
-        if len(parts) == 2:
-            mint_url, quote = parts
-            return mint_url, "sat", quote
-        if len(parts) == 3:
-            mint_url, unit, quote = parts
-            return mint_url, unit, quote
-        raise ValueError(f"Invalid legacy checking_id (pipe parts={len(parts)}): {checking_id!r}")
-
-    # New: base64url(JSON), accept missing padding
-    try:
-        pad = "=" * (-len(s) % 4)
-        raw = base64.urlsafe_b64decode((s + pad).encode("ascii"))
-        obj = json.loads(raw.decode("utf-8"))
-
-        # accept either short or long keys
-        mint_url = obj.get("m") or obj.get("mint_url")
-        unit = obj.get("u") or obj.get("unit") or "sat"
-        quote = obj.get("q") or obj.get("quote")
-
-        if not mint_url or not quote:
-            raise KeyError("missing mint_url/quote")
-        return mint_url, unit, quote
-    except Exception as e:
-        raise ValueError(f"Invalid checking_id: {checking_id!r}") from e
-
+def decode_mint_checking_id(checking_id: str) -> Tuple[str, str, str]:
+    mint_url, unit, quote = checking_id.split("|", 2)
+    return mint_url, unit, quote
