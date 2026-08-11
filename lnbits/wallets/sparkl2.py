@@ -297,10 +297,16 @@ class SparkL2Wallet(Wallet):
             "REFUND_SIGNING_COMMITMENTS_QUERYING_FAILED",
             "TRANSFER_CREATION_FAILED",
         }
+        pending = {
+            "INVOICE_CREATED",
+            "TRANSFER_CREATED",
+        }
         if status in success:
             return PaymentSuccessStatus()
         if status in failed:
             return PaymentFailedStatus()
+        if status not in pending:
+            logger.warning(f"Unknown Spark receive invoice status: {status!r}")
         return PaymentPendingStatus()
 
     def _map_payment_status(self, status: str) -> PaymentStatus:
@@ -316,10 +322,19 @@ class SparkL2Wallet(Wallet):
             "USER_TRANSFER_VALIDATION_FAILED",
             "USER_SWAP_RETURN_FAILED",
         }
+        pending = {
+            "CREATED",
+            "REQUEST_VALIDATED",
+            "LIGHTNING_PAYMENT_INITIATED",
+            "PENDING_USER_SWAP_RETURN",
+            "USER_SWAP_RETURNED",
+        }
         if status in success:
             return PaymentSuccessStatus()
         if status in failed:
             return PaymentFailedStatus()
+        if status not in pending:
+            logger.warning(f"Unknown Spark send payment status: {status!r}")
         return PaymentPendingStatus()
 
     def _map_payment_ok(self, status: str) -> bool | None:

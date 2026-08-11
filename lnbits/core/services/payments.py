@@ -838,12 +838,21 @@ async def _pay_external_invoice(
         )
         return payment
 
-    # payment failed
-    if (
-        payment_response.checking_id is None
-        or payment_response.ok is False
-        or payment_response.checking_id != checking_id
-    ):
+    # The Spark sidecar returns its Spark request ID as checking_id. It is
+    # normally different from the invoice payment hash used to create the
+    # initial LNbits row, so do not reject the response merely because the IDs
+    # differ. Persist the Spark ID before handling pending HODL/slow payments;
+    # subsequent status checks must use that ID.
+    if payment_response.checking_id is None:
+        payment.status = PaymentState.FAILED
+        await update_payment(payment, conn=conn)
+        message = payment_response.error_message or "without an error message."
+        raise PaymentError(f"Payment failed: {message}", status="failed")
+
+    payment.checking_id = payment_response.checking_id
+    await update_payment(payment, conn=conn)
+
+    if payment_response.ok is False:
         payment.status = PaymentState.FAILED
         await update_payment(payment, conn=conn)
         message = payment_response.error_message or "without an error message."
@@ -857,7 +866,6 @@ async def _pay_external_invoice(
         await _send_payment_notification_in_background(wallet.id, payment, conn=conn)
         logger.success(f"payment successful {payment_response.checking_id}")
 
-    payment.checking_id = payment_response.checking_id
     return payment
 
 
